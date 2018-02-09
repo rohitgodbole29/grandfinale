@@ -1,0 +1,208 @@
+---
+title: "Predicting_excercise"
+author: "RG"
+date: "February 5, 2018"
+output: github_document
+---
+
+```{r setup, include=FALSE, message=FALSE,warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r load libraries, message=FALSE,warning=FALSE}
+library(caret)
+library(rpart)
+library(rattle)
+library(dplyr)
+library(here)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(GGally)
+library(reshape)
+```
+
+## Load the training data.
+we are also creating a partition called "val" so that we can have private data for ensembling different models.
+The validation data is a seperate partition within the training data. This is not the traditional nomenclature for validation data,
+however it may be better understood as staging data. IN any case this seperate partition allows us to keep the testing data , untouched till the final stage.
+
+```{r discover, echo=TRUE, message=FALSE,warning=FALSE}
+dat_train = read.csv(file= here("pml-training.csv"), header=TRUE)
+inTrain<- createDataPartition(y = dat_train$classe,p = 0.9,list = FALSE)
+dat_train<-dat_train[inTrain,]
+dat_train<-na.omit(dat_train)
+dat_val<-dat_train[-inTrain,]
+dat_val<-na.omit(dat_val)
+
+```
+## Load the test data.
+Here we have choosen only those predictors that have non-NA values in the test data set.
+We also got rid of obviously unrelated predictors like timestamp and username , which hopefully would have no bearing on the outcome. This is confirmed by the plot below.
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+g<- ggplot(data = dat_train,mapping = aes(x = dat_train$user_name))
+g+geom_bar(aes(fill=dat_train$classe))+coord_flip()
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+dat_test = read.csv(file= here("pml-testing.csv"), header=TRUE)
+dat_test1<-dat_test[colSums(!is.na(dat_test))>0]  # get rid of NAs column wise.
+# get rid of the columns which obviously have nothing to to with the response like username
+drop.cols<-c("user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","X","problem_id")
+dat_test1<-dat_test1%>%select(-one_of(drop.cols))
+z1<-names(dat_test1)
+```
+
+
+## Subset the Training set and the validation data.
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+z2<- names(dat_train)
+z3<- intersect(z1,z2)
+
+dat_train1<- select(.data = dat_train,z3)
+dat_train2<-select(.data = dat_train,"classe")
+dat_train3<-cbind(dat_train1,dat_train2)
+
+dat_val1<- select(.data = dat_val,z3)
+dat_val2<-select(.data = dat_val,"classe")
+dat_val3<-cbind(dat_val1,dat_val2)
+
+```
+
+
+
+
+## Configure Parallel Processing
+```{r,message=FALSE,warning=FALSE}
+library(parallel)
+library(doParallel)
+cluster<-makeCluster(detectCores()-1) # one core for the OS.
+registerDoParallel(cluster)
+```
+
+## Model1 :Build a Random Forest  model & Confusion Matrix
+```{r build model1, echo =TRUE,message=FALSE,warning=FALSE}
+fitControl<-trainControl(method = "cv",number = 5,allowParallel = TRUE)
+modFit<-train(form = classe~.,data = dat_train3,method="rf",prox=TRUE,trControl=fitControl)
+pred<-predict(modFit,dat_val3)
+confusionMatrix(pred,dat_val3$classe)
+```
+
+## Out of sample Error : An estimate can be provided based on the accuracy in prediction on the Val dat set.
+We notice that the 95% CI is (0.8806 ,1). This means that the in the worst case we are 95% confident that the accuracy wont be lower 
+than 88%. That gives us a mean accuracy of about 94% or an expected error of about 6%.
+
+
+
+## Model2 : Build a Naive Bayes Model 
+```{r build model2, echo=TRUE,message=FALSE,warning=FALSE}
+modnb = train(form=classe~.,data = na.omit(dat_train3),method="nb")
+```
+
+
+## Predict model2 : NB on Validation and generate confusion matrix
+```{r,message=FALSE,warning=FALSE}
+pnb= predict(modnb,dat_val3)
+confusionMatrix(pnb,dat_val3$classe)
+```
+
+## Model3 : Use a boosting algorithm.
+```{r, echo=FALSE, results= FALSE,message=FALSE,warning=FALSE}
+modboost = train(form=classe~.,data = na.omit(dat_train3),method="gbm",verbose=FALSE)
+
+```
+## Predicting on Validation using boosting
+```{r,message=FALSE,warning=FALSE}
+pboost= predict(modboost,dat_val3)
+confusionMatrix(pboost,dat_val3$classe)
+```
+
+## Model4 : Use a model stacking approach.
+
+```{r, echo= FALSE, results=FALSE,message=FALSE,warning=FALSE}
+
+predDF <- data.frame(pred,pnb,pboost,classe=dat_val2$classe)
+pcombined = train(form=classe~.,data = na.omit(predDF),method="gam",verbose=FALSE)
+
+pstackedtest= predict(pcombined,predDF)
+confusionMatrix(pstackedtest,predDF$classe)
+```
+
+
+## deregsiter from the parallel processing
+```{r,message=FALSE,warning=FALSE}
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+
+## Predict on the Test Set using the Random Forest Algo.
+
+```{r,message=FALSE,warning=FALSE}
+predTest<-predict(modFit,dat_test1)
+predTest
+```
+
+
+## Predict using Naive Bayes on the Test data.
+
+```{r,message=FALSE,warning=FALSE}
+pnbtest= predict(modnb,dat_test1)
+pnbtest
+```
+
+## Predict on the test set using the boosting algo.
+```{r,message=FALSE,warning=FALSE}
+pbootest= predict(modboost,dat_test1)
+pbootest
+
+```
+
+## Predicting the combined model ( all 3 models combined) on the test data
+```{r,message=FALSE,warning=FALSE}
+# we shall use the values of the predictions of the earlier models on the test data.Accordingly.
+predVDF<- data.frame(pred= predTest,pnb=pnbtest, pboost= pbootest)
+pstackedfinal= predict(pcombined,predVDF)
+pstackedfinal
+
+```
+
+
+The Random Forest model seems to fit better than the combined model, since the classification is coarse. 
+
+
+
+This gives a good variation. Let us understand the agreement between the boosting and random forest approaches.
+```{r,message=FALSE,warning=FALSE}
+qplot(x = predTest,y = pbootest,data = dat_test1)
+table(predTest,pbootest)
+confusionMatrix(predTest,pbootest)
+```
+## Let us try voting from the 4 approaches considered as above.
+
+-- predTest from Random Forest  :In-sample-->accuracy = 1
+-- pnbtest from NB: In-Sample --> accuracy = 0.5263
+-- pbootest from the Boosting model--> accuracy = 1
+-- pstackedfinal from the stacked model--> accuracy =0.3684
+
+Table below shows the votes for each of the options A...E  for cases 1 through 20.
+```{r, echo= FALSE,message=FALSE,warning=FALSE}
+df1<- data.frame(id= seq(from = 1,to = 20,by = 1),rf=predTest,nb=pnbtest,boosting=pbootest,stacked=pstackedfinal)
+molten<- melt(data = df1,id.vars = "id")
+cast1<- cast(data = molten,formula = id+value+variable~.)
+drop.cols1<-c("variable","(all)")
+cast2<- cast1%>%select(-one_of(drop.cols1))
+table(cast2)
+
+```
+
+
+
+
